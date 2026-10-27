@@ -1,12 +1,34 @@
 {
   "skins": {
     "npc_dota_hero_terrorblade": {
-      "hero_base": "5957",
-      "head": "37161",
+      "head": "5957",
       "weapon": "307",
       "back": "306",
-      "armor": "476",
-      "ability3": "8650"
+      "armor": "476"
+    },
+    "npc_dota_hero_invoker": {
+      "head": "12762",
+      "back": "48",
+      "shoulder": "89",
+      "arms": "100",
+      "belt": "305"
+    },
+    "npc_dota_hero_juggernaut": {
+      "head": {
+        "id": "9059",
+        "style": 1
+      },
+      "weapon": "7",
+      "back": "8",
+      "arms": "9",
+      "legs": "62"
+    },
+    "npc_dota_hero_axe": {
+      "weapon": "31244",
+      "armor": "31247",
+      "head": "31246",
+      "belt": "31288",
+      "misc": "31245"
     },
     "npc_dota_hero_pudge": {
       "persona_selector": "13786",
@@ -21,13 +43,6 @@
       "head": "13769",
       "shoulder": "13768",
       "weapon": "13770"
-    },
-    "npc_dota_hero_invoker": {
-      "head": "12762",
-      "back": "48",
-      "shoulder": "89",
-      "arms": "100",
-      "belt": "305"
     }
   },
   "prismatic": {
@@ -42,7 +57,7 @@
     }
   },
   "unusual": {
-    "npc_dota_hero_queenofpain": "particles/econ/courier/courier_trail_lava/courier_trail_lava.vpcf",
-    "npc_dota_hero_invoker": "particles/econ/seasonal/seasonal_ambient_silver.vpcf"
+    "npc_dota_hero_invoker": "particles/econ/seasonal/seasonal_ambient_silver.vpcf",
+    "npc_dota_hero_queenofpain": "particles/econ/courier/courier_trail_lava/courier_trail_lava.vpcf"
   }
 }

@@ -355,7 +355,8 @@ def patch_vpcf_binary(raw_bytes: bytes, target_rgb: List[int]) -> bytes:
     """
     Patches Source 2 compiled particle system (.vpcf_c) KV3 binary resource:
     recolors m_ConstantColor, m_ColorMin, and m_ColorMax to match target_rgb [R, G, B].
-    Preserves all KV3 structure and recalculates compressed/uncompressed block sizes.
+    Preserves all KV3 structure, recalculates compressed/uncompressed block sizes,
+    and preserves any trailing bytes (padding/CRC) without truncating the file.
     """
     data_idx = raw_bytes.find(b'DATA')
     if data_idx == -1:
@@ -394,6 +395,7 @@ def patch_vpcf_binary(raw_bytes: bytes, target_rgb: List[int]) -> bytes:
         return raw_bytes
         
     comp_data = raw_bytes[pos : pos + comp_total]
+    trailing_bytes = raw_bytes[pos + comp_total :]
     try:
         decomp = bytearray(lz4.block.decompress(comp_data, uncompressed_size=uncomp_total))
     except Exception:
@@ -422,45 +424,59 @@ def patch_vpcf_binary(raw_bytes: bytes, target_rgb: List[int]) -> bytes:
     # 1. Patch m_ConstantColor (only in root object fields, i < 150)
     if "m_ConstantColor" in strings:
         str_id = strings.index("m_ConstantColor")
-        for i in range(8, min(150, b4_len - 16), 4):
+        for i in range(4, min(150, b4_len - 16), 4):
             val = struct.unpack_from("<i", decomp, i)[0]
             if val == str_id:
-                arr_len = struct.unpack_from("<i", decomp, i + 4)[0]
-                if arr_len in (3, 4):
+                p1 = struct.unpack_from("<i", decomp, i + 4)[0]
+                if p1 in (3, 4):
                     r_old = struct.unpack_from("<i", decomp, i + 8)[0]
                     g_old = struct.unpack_from("<i", decomp, i + 12)[0]
                     b_old = struct.unpack_from("<i", decomp, i + 16)[0]
                     if g_old > 20 or b_old > 20 or r_old > 20:
                         lum = max(r_old, g_old, b_old) / 255.0
-                        new_r = max(0, min(255, int(target_rgb[0] * lum)))
-                        new_g = max(0, min(255, int(target_rgb[1] * lum)))
-                        new_b = max(0, min(255, int(target_rgb[2] * lum)))
-                        struct.pack_into("<i", decomp, i + 8, new_r)
-                        struct.pack_into("<i", decomp, i + 12, new_g)
-                        struct.pack_into("<i", decomp, i + 16, new_b)
+                        struct.pack_into("<i", decomp, i + 8, max(0, min(255, int(target_rgb[0] * lum))))
+                        struct.pack_into("<i", decomp, i + 12, max(0, min(255, int(target_rgb[1] * lum))))
+                        struct.pack_into("<i", decomp, i + 16, max(0, min(255, int(target_rgb[2] * lum))))
                         modified = True
-                        break # Never continue past root m_ConstantColor!
+                        break
+                elif 0 <= p1 <= 255:
+                    p2 = struct.unpack_from("<i", decomp, i + 8)[0]
+                    p3 = struct.unpack_from("<i", decomp, i + 12)[0]
+                    if 0 <= p2 <= 255 and 0 <= p3 <= 255 and (p1 > 20 or p2 > 20 or p3 > 20):
+                        lum = max(p1, p2, p3) / 255.0
+                        struct.pack_into("<i", decomp, i + 4, max(0, min(255, int(target_rgb[0] * lum))))
+                        struct.pack_into("<i", decomp, i + 8, max(0, min(255, int(target_rgb[1] * lum))))
+                        struct.pack_into("<i", decomp, i + 12, max(0, min(255, int(target_rgb[2] * lum))))
+                        modified = True
+                        break
                         
     # 2. Patch C_INIT_RandomColor (m_ColorMin / m_ColorMax) and color fade
     for c_key in ["m_ColorMin", "m_ColorMax", "m_ColorFade"]:
         if c_key in strings:
             str_id = strings.index(c_key)
-            for i in range(8, min(150, b4_len - 16), 4):
+            for i in range(4, min(150, b4_len - 16), 4):
                 val = struct.unpack_from("<i", decomp, i)[0]
                 if val == str_id:
-                    arr_len = struct.unpack_from("<i", decomp, i + 4)[0]
-                    if arr_len in (3, 4):
+                    p1 = struct.unpack_from("<i", decomp, i + 4)[0]
+                    if p1 in (3, 4):
                         r_old = struct.unpack_from("<i", decomp, i + 8)[0]
                         g_old = struct.unpack_from("<i", decomp, i + 12)[0]
                         b_old = struct.unpack_from("<i", decomp, i + 16)[0]
                         if g_old > 20 or b_old > 20 or r_old > 20:
                             lum = max(r_old, g_old, b_old) / 255.0
-                            new_r = max(0, min(255, int(target_rgb[0] * lum)))
-                            new_g = max(0, min(255, int(target_rgb[1] * lum)))
-                            new_b = max(0, min(255, int(target_rgb[2] * lum)))
-                            struct.pack_into("<i", decomp, i + 8, new_r)
-                            struct.pack_into("<i", decomp, i + 12, new_g)
-                            struct.pack_into("<i", decomp, i + 16, new_b)
+                            struct.pack_into("<i", decomp, i + 8, max(0, min(255, int(target_rgb[0] * lum))))
+                            struct.pack_into("<i", decomp, i + 12, max(0, min(255, int(target_rgb[1] * lum))))
+                            struct.pack_into("<i", decomp, i + 16, max(0, min(255, int(target_rgb[2] * lum))))
+                            modified = True
+                            break
+                    elif 0 <= p1 <= 255:
+                        p2 = struct.unpack_from("<i", decomp, i + 8)[0]
+                        p3 = struct.unpack_from("<i", decomp, i + 12)[0]
+                        if 0 <= p2 <= 255 and 0 <= p3 <= 255 and (p1 > 20 or p2 > 20 or p3 > 20):
+                            lum = max(p1, p2, p3) / 255.0
+                            struct.pack_into("<i", decomp, i + 4, max(0, min(255, int(target_rgb[0] * lum))))
+                            struct.pack_into("<i", decomp, i + 8, max(0, min(255, int(target_rgb[1] * lum))))
+                            struct.pack_into("<i", decomp, i + 12, max(0, min(255, int(target_rgb[2] * lum))))
                             modified = True
                             break
                             
@@ -474,11 +490,55 @@ def patch_vpcf_binary(raw_bytes: bytes, target_rgb: List[int]) -> bytes:
     struct.pack_into("<i", prefix, comp_header_offset + 4, new_comp_total)
     new_data_size = (pos - data_start) + new_comp_total
     struct.pack_into("<I", prefix, data_idx + 8, new_data_size)
-    new_file = prefix + new_comp_data
+    new_file = prefix + new_comp_data + trailing_bytes
     new_file_size = len(new_file)
     struct.pack_into("<I", new_file, 0, new_file_size)
     return bytes(new_file)
 
+
+def filter_modifiers_by_style(item_body: str, chosen_style: Any) -> str:
+    """
+    Filters visuals -> asset_modifier blocks by chosen_style.
+    Keeps modifiers with no style key or matching chosen_style.
+    Discards modifiers with other style keys.
+    """
+    if chosen_style is None:
+        return item_body
+    target_style = str(chosen_style).strip()
+    
+    v_brace = find_top_level_block(item_body, "visuals")
+    if v_brace < 0:
+        return item_body
+    v_end = extract_balanced_block_end(item_body, v_brace)
+    if v_end < 0:
+        return item_body
+        
+    visuals_body = item_body[v_brace + 1: v_end - 1]
+    
+    new_visuals_parts = []
+    last_end = 0
+    for m in re.finditer(r'"asset_modifier\d*"\s*\{', visuals_body, re.IGNORECASE):
+        start = m.start()
+        new_visuals_parts.append(visuals_body[last_end:start])
+        b_open = visuals_body.find('{', start)
+        b_close = extract_balanced_block_end(visuals_body, b_open)
+        if b_close < 0:
+            last_end = start
+            break
+        mod_chunk = visuals_body[start:b_close]
+        last_end = b_close
+        
+        m_st = re.search(r'"style"\s+"([^"]+)"', mod_chunk)
+        if m_st:
+            mod_style = m_st.group(1).strip()
+            if mod_style == target_style:
+                new_visuals_parts.append(mod_chunk)
+        else:
+            new_visuals_parts.append(mod_chunk)
+            
+    new_visuals_parts.append(visuals_body[last_end:])
+    filtered_visuals = "".join(new_visuals_parts)
+    return item_body[:v_brace + 1] + filtered_visuals + item_body[v_end - 1:]
 
 class FastVpkBuilder:
     def __init__(self, raw_text: str, catalog_data: Dict[str, Any]):
@@ -540,25 +600,35 @@ class FastVpkBuilder:
 
         body = target_raw[first_brace + 1:last_brace].strip()
 
-        # Prefab must ALWAYS be default_item for default hero slots so Dota 2 equips them freely
-        if '"prefab"' in body:
-            body = re.sub(r'"prefab"\s+"[^"]+"', '"prefab"\t\t"default_item"', body)
+        # Preserve prefab (wearable / etc.), ensure not default_item so inspect doesn't show "СТАНДАРТНЫЙ НАБОР"
+        if '"prefab"' not in body:
+            body = '\t"prefab"\t\t"wearable"\n' + body
+        elif '"prefab"' in body and '"default_item"' in body:
+            body = re.sub(r'"prefab"\s+"default_item"', '"prefab"\t\t"wearable"', body)
+
+        # Preserve / ensure capabilities so Dota Inspect renders Common Sockets, Properties, Description
+        if '"capabilities"' not in body:
+            body = body + '\n\t"capabilities"\n\t{\n\t\t"nameable"\t\t"1"\n\t\t"can_have_sockets"\t\t"1"\n\t\t"gems_can_be_extracted"\t\t"1"\n\t}'
         else:
-            body = '\t"prefab"\t\t"default_item"\n' + body
+            if '"can_have_sockets"' not in body:
+                body = body.replace('"capabilities"\n\t{', '"capabilities"\n\t{\n\t\t"can_have_sockets"\t\t"1"')
 
-        # Ensure item rarity exists
+        # Ensure correct item_slot (e.g. "head" instead of "hero_base" or "base")
+        if slot_name:
+            if '"item_slot"' in body:
+                body = re.sub(r'"item_slot"\s+"[^"]+"', f'"item_slot"\t\t"{slot_name}"', body)
+            else:
+                body = f'\t"item_slot"\t\t"{slot_name}"\n' + body
+
+        # Ensure item rarity exists (preserve target item original rarity)
         if '"item_rarity"' not in body:
-            body = '\t"item_rarity"\t\t"uncommon"\n' + body
-
-        # Slot name
-        if slot_name and '"item_slot"' not in body:
-            body = f'\t"item_slot"\t\t"{slot_name}"\n' + body
+            body = '\t"item_rarity"\t\t"rare"\n' + body
 
         # Used by heroes
         if hero_name and '"used_by_heroes"' not in body:
             body = body + f'\n\t"used_by_heroes"\n\t{{\n\t\t"{hero_name}"\t\t"1"\n\t}}'
 
-        # Fallback model_player if missing
+        # Fallback model_player if missing and no entity_model
         if '"model_player"' not in body and '"entity_model"' not in body:
             def_span = self.item_spans.get(def_id)
             if def_span:
@@ -567,18 +637,10 @@ class FastVpkBuilder:
                 if m_model:
                     body = f'\t"model_player"\t\t"{m_model.group(1)}"\n' + body
 
-        # Style / skin
+        # Style / skin filtering and setting
         if style is not None:
+            body = filter_modifiers_by_style(body, style)
             body = body + f'\n\t"style"\t\t"{style}"\n\t"skin"\t\t"{style}"'
-
-        # Ensure description exists for items with custom particles/sockets
-        if unusual_particle or sockets:
-            if '"item_description"' not in body:
-                body = body + f'\n\t"item_description"\t\t"#DOTA_Item_Desc_{target_item_id}"'
-
-        # Sockets injection for real gem inspection card
-        if sockets:
-            body = inject_static_sockets(body, sockets)
 
         # Collect modifiers to inject into single visuals block
         mods_to_inject = []
@@ -630,62 +692,40 @@ class FastVpkBuilder:
             if hero_name == "npc_dota_hero_terrorblade":
                 has_arcana = (
                     str(slots.get("hero_base", "")) == "5957" or 
-                    str(slots.get("head", "")) == "5957" or
+                    str(slots.get("head", "")) in ("5957", "37161") or
                     (isinstance(slots.get("hero_base"), dict) and str(slots.get("hero_base", {}).get("id")) == "5957") or
-                    (isinstance(slots.get("head"), dict) and str(slots.get("head", {}).get("id")) == "5957")
+                    (isinstance(slots.get("head"), dict) and str(slots.get("head", {}).get("id")) in ("5957", "37161"))
                 )
 
                 if has_arcana:
-                    tb_sockets = []
                     tb_particle = hero_unusual if hero_unusual else None
-                    if tb_particle:
-                        eff_id = ETHEREAL_EFFECT_MAP.get(tb_particle, 129)
-                        tb_sockets.append({"type": "ethereal", "gem_def_index": 3045, "effect": eff_id})
 
-                    # 1. Map Arcana 5957 to hero_base (913)
-                    if "913" not in replaced_def_ids and "913" in self.item_spans:
+                    # Equip Arcana onto head slot (478)
+                    if "478" not in replaced_def_ids and "478" in self.item_spans and "5957" in self.item_spans:
                         arcana_block = self.build_merged_item_block(
-                            def_id="913",
+                            def_id="478",
                             target_item_id="5957",
                             hero_name=hero_name,
-                            slot_name="hero_base",
+                            slot_name="head",
                             unusual_particle=tb_particle,
                             kinetic_activity=hero_kinetic,
-                            sockets=tb_sockets if tb_sockets else None
                         )
                         if arcana_block:
-                            dspan = self.item_spans["913"]
-                            replacements.append((dspan[0], dspan[1], arcana_block))
-                            replaced_def_ids.add("913")
-
-                    # 2. Map Arcana Horns (37161) to head (478)
-                    head_val = slots.get("head")
-                    head_id = ""
-                    head_style = None
-                    if isinstance(head_val, dict):
-                        head_id = str(head_val.get("id", ""))
-                        head_style = head_val.get("style")
-                    elif head_val:
-                        head_id = str(head_val)
-
-                    target_horns_id = head_id if head_id and head_id != "5957" else "37161"
-
-                    if "478" not in replaced_def_ids and "478" in self.item_spans and target_horns_id in self.item_spans:
-                        horns_block = self.build_merged_item_block(
-                            def_id="478",
-                            target_item_id=target_horns_id,
-                            hero_name=hero_name,
-                            slot_name="head",
-                            style=head_style,
-                            sockets=tb_sockets if tb_sockets else None
-                        )
-                        if horns_block:
+                            if '"model_player"' not in arcana_block:
+                                arcana_block = arcana_block.replace(
+                                    '"item_slot"\t\t"head"',
+                                    '"item_slot"\t\t"head"\r\n\t\t\t"model_player"\t\t"models/heroes/terrorblade/horns_arcana.vmdl"'
+                                )
                             dspan = self.item_spans["478"]
-                            replacements.append((dspan[0], dspan[1], horns_block))
+                            replacements.append((dspan[0], dspan[1], arcana_block))
                             replaced_def_ids.add("478")
+                            replaced_def_ids.add("913")  # Preserve default 913 cleanly
 
             # --- GENERAL SLOTS MAPPING ---
             for slot_name, skin_val in slots.items():
+                if hero_name == "npc_dota_hero_terrorblade" and slot_name in ("hero_base", "head") and has_arcana:
+                    continue
+
                 target_item_id = ""
                 selected_style = None
 
@@ -704,12 +744,21 @@ class FastVpkBuilder:
 
                 target_raw = self.raw_text[target_span[0]:target_span[1]]
                 m_slot = re.search(r'"item_slot"\s+"([^"]+)"', target_raw)
-                actual_slot = m_slot.group(1) if m_slot else slot_name
+                item_raw_slot = m_slot.group(1) if m_slot else slot_name
+
+                # If user equipped an item into a slot like "head", but the skin in items_game has "hero_base" (e.g. Jugg Arcana),
+                # map to slot_name!
+                if slot_name in ("head", "weapon", "back", "arms", "armor", "belt", "misc", "legs") and item_raw_slot in ("hero_base", "base"):
+                    actual_slot = slot_name
+                else:
+                    actual_slot = slot_name if slot_name in default_items else item_raw_slot
 
                 def_info = default_items.get(actual_slot)
                 if not def_info:
+                    def_info = default_items.get(slot_name)
+                if not def_info:
                     for s, d in default_items.items():
-                        if s == actual_slot or actual_slot in s:
+                        if s == actual_slot or actual_slot in s or s == slot_name:
                             def_info = d
                             break
 
@@ -720,31 +769,17 @@ class FastVpkBuilder:
                 if def_id in replaced_def_ids or def_id not in self.item_spans:
                     continue
 
-                # Prepare sockets & particles
-                item_sockets = []
+                # Prepare unusual particle
                 item_particle = None
-
-                # Slot eligible for unusual particle & ethereal socket
                 is_effect_slot = (
                     actual_slot in ("weapon", "weapon_persona_1", "offhand_weapon_persona_1") or
                     (actual_slot in ("back", "wings") and hero_name == "npc_dota_hero_queenofpain") or
                     (actual_slot in ("head",) and hero_name == "npc_dota_hero_invoker") or
-                    (actual_slot in ("hero_base", "head") and hero_name == "npc_dota_hero_terrorblade")
+                    (actual_slot in ("head",) and hero_name == "npc_dota_hero_terrorblade")
                 )
 
                 if hero_unusual and is_effect_slot:
                     item_particle = hero_unusual
-                    eff_id = ETHEREAL_EFFECT_MAP.get(hero_unusual, 826)
-                    item_sockets.append({"type": "ethereal", "gem_def_index": 3045, "effect": eff_id})
-
-                # Hero-specific kinetic gem injection for authentic inspection card view
-                if hero_kinetic and actual_slot in ("head", "weapon", "weapon_persona_1"):
-                    hero_kinetic_defaults = {
-                        "npc_dota_hero_pudge": 104,
-                    }
-                    k_mod = hero_kinetic_defaults.get(hero_name)
-                    if k_mod:
-                        item_sockets.append({"type": "kinetic", "gem_def_index": 3005, "hero": hero_name, "asset_modifier": k_mod})
 
                 new_block = self.build_merged_item_block(
                     def_id=def_id,
@@ -754,14 +789,12 @@ class FastVpkBuilder:
                     style=selected_style,
                     unusual_particle=item_particle,
                     kinetic_activity=hero_kinetic,
-                    sockets=item_sockets if item_sockets else None
                 )
 
                 if new_block:
                     def_span = self.item_spans[def_id]
                     replacements.append((def_span[0], def_span[1], new_block))
                     replaced_def_ids.add(def_id)
-
         # 2. Global Items
         global_items = preset.get("global_items", {})
         for cat_name, target_item_id in global_items.items():
@@ -943,82 +976,6 @@ class FastVpkBuilder:
                                         os.makedirs(os.path.dirname(out_vmat), exist_ok=True)
                                         with open(out_vmat, 'wb') as f:
                                             f.write(mat_bytes)
-
-                    # E. Real In-Game Gem Display via Localization
-                    loc_targets = [
-                        ('resource/localization/items_russian.txt', 'russian'),
-                        ('resource/localization/items_english.txt', 'english'),
-                    ]
-                    for loc_path, lang in loc_targets:
-                        if loc_path in dota_archive:
-                            try:
-                                loc_bytes = dota_archive[loc_path].read()
-                                loc_text = loc_bytes.decode('utf-8', errors='ignore')
-                                modified_loc = False
-
-                                # 1. Terrorblade Prismatic Gem Badge
-                                if tb_prismatic:
-                                    p_name = tb_prismatic.get("name", "Rubiline") if isinstance(tb_prismatic, dict) else str(tb_prismatic)
-                                    p_hex = tb_prismatic.get("hex", "#D11FA1") if isinstance(tb_prismatic, dict) else "#D11FA1"
-                                    
-                                    # Desc
-                                    tb_desc_token = '"DOTA_Item_Desc_Fractal_Shard_of_Inner_Abysm"'
-                                    if tb_desc_token in loc_text:
-                                        if lang == 'russian':
-                                            badge = f"<font color='{p_hex}'><b>◆ ПРИЗМАТИЧЕСКИЙ САМОЦВЕТ: {p_name} ({p_hex})</b></font><br><br>"
-                                        else:
-                                            badge = f"<font color='{p_hex}'><b>◆ PRISMATIC GEM: {p_name} ({p_hex})</b></font><br><br>"
-                                        m_tb = re.search(r'("DOTA_Item_Desc_Fractal_Shard_of_Inner_Abysm"\s*")([^"]*)(")', loc_text)
-                                        if m_tb and badge not in m_tb.group(2):
-                                            loc_text = loc_text[:m_tb.start(2)] + badge + m_tb.group(2) + loc_text[m_tb.end(2):]
-                                            modified_loc = True
-
-                                    # Title
-                                    tb_title_token = '"DOTA_Item_Fractal_Horns_of_Inner_Abysm"'
-                                    if tb_title_token in loc_text:
-                                        m_title = re.search(r'("DOTA_Item_Fractal_Horns_of_Inner_Abysm"\s*")([^"]*)(")', loc_text)
-                                        if m_title and f"({p_name})" not in m_title.group(2):
-                                            loc_text = loc_text[:m_title.start(2)] + m_title.group(2) + f" ({p_name})" + loc_text[m_title.end(2):]
-                                            modified_loc = True
-
-                                # 2. Invoker Northern Blight Style Unusual Ethereal Gem Badge
-                                inv_unusual = unusual_config.get("npc_dota_hero_invoker")
-                                if inv_unusual:
-                                    eff_name = "Frostbloom" if "silver" in inv_unusual else "Ethereal"
-                                    eff_color = "#94CAD0"
-                                    if lang == 'russian':
-                                        inv_badge = f"<font color='{eff_color}'><b>◆ НЕОБЫЧНЫЙ ЭФИРНЫЙ САМОЦВЕТ: {eff_name}</b></font><br>Встроенный редкий самоцвет Доты (Ледяное цветение)."
-                                    else:
-                                        inv_badge = f"<font color='{eff_color}'><b>◆ UNUSUAL ETHEREAL GEM: {eff_name}</b></font><br>Embedded rare Ethereal Gem."
-                                    
-                                    desc_key = '"DOTA_Item_Desc_12762"'
-                                    if desc_key in loc_text:
-                                        m_inv = re.search(r'("DOTA_Item_Desc_12762"\s*")([^"]*)(")', loc_text)
-                                        if m_inv and inv_badge not in m_inv.group(2):
-                                            loc_text = loc_text[:m_inv.start(2)] + inv_badge + loc_text[m_inv.end(2):]
-                                            modified_loc = True
-                                    else:
-                                        last_brace = loc_text.rfind('}')
-                                        if last_brace != -1:
-                                            entry = f'\t\t"DOTA_Item_Desc_12762"\t\t"{inv_badge}"\n'
-                                            loc_text = loc_text[:last_brace] + entry + loc_text[last_brace:]
-                                            modified_loc = True
-
-                                    inv_title_token = '"DOTA_Item_Northern_Blight_Style"'
-                                    if inv_title_token in loc_text:
-                                        m_ititle = re.search(r'("DOTA_Item_Northern_Blight_Style"\s*")([^"]*)(")', loc_text)
-                                        if m_ititle and f"({eff_name})" not in m_ititle.group(2):
-                                            loc_text = loc_text[:m_ititle.start(2)] + m_ititle.group(2) + f" (Unusual {eff_name})" + loc_text[m_ititle.end(2):]
-                                            modified_loc = True
-
-                                if modified_loc:
-                                    out_loc = os.path.join(temp_dir, *loc_path.split('/'))
-                                    os.makedirs(os.path.dirname(out_loc), exist_ok=True)
-                                    with open(out_loc, 'wb') as f_loc:
-                                        f_loc.write(loc_text.encode('utf-8'))
-                                    print(f"[Builder] Injected real in-game gem badges into {loc_path}")
-                            except Exception as e_loc:
-                                print(f"[Builder] Warning: failed to patch {loc_path}: {e_loc}")
 
                             # 3. Patch Terrorblade Arcana 3D Color LUT Textures
                             cw_tex_paths = [
