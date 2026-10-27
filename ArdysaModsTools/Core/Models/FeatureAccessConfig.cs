@@ -1,0 +1,99 @@
+/*
+ * Copyright (C) 2026 Ardysa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+using System.Text.Json.Serialization;
+
+namespace ArdysaModsTools.Core.Models
+{
+    public class FeatureAccessConfig
+    {
+        [JsonPropertyName("skinSelector")]
+        public FeatureAccess SkinSelector { get; set; } = new();
+
+        [JsonPropertyName("miscellaneous")]
+        public FeatureAccess Miscellaneous { get; set; } = new();
+
+        [JsonPropertyName("installModsPack")]
+        public FeatureAccess InstallModsPack { get; set; } = new();
+
+        [JsonPropertyName("utilities")]
+        public FeatureAccess Utilities { get; set; } = new();
+
+        public static FeatureAccessConfig CreateDefault() => new();
+    }
+
+    public class FeatureAccess
+    {
+        [JsonPropertyName("enabled")]
+        public bool Enabled { get; set; } = true;
+
+        [JsonPropertyName("greyOut")]
+        public bool GreyOut { get; set; }
+
+        [JsonPropertyName("disabledMessage")]
+        public string? DisabledMessage { get; set; }
+
+        [JsonPropertyName("minVersion")]
+        public string? MinVersion { get; set; }
+
+        [JsonPropertyName("minBuild")]
+        public int MinBuild { get; set; }
+
+        [JsonPropertyName("outdatedMessage")]
+        public string? OutdatedMessage { get; set; }
+
+        [JsonPropertyName("cooldownEnabled")]
+        public bool CooldownEnabled { get; set; } = true;
+
+        [JsonPropertyName("cooldownSeconds")]
+        public int? CooldownSeconds { get; set; }
+
+        public bool IsCooldownEnabled() => CooldownEnabled && (CooldownSeconds == null || CooldownSeconds > 0);
+
+        public TimeSpan GetEffectiveCooldownDuration(TimeSpan defaultDuration)
+        {
+            if (!CooldownEnabled || CooldownSeconds == 0)
+                return TimeSpan.Zero;
+
+            if (CooldownSeconds.HasValue && CooldownSeconds.Value > 0)
+                return TimeSpan.FromSeconds(CooldownSeconds.Value);
+
+            return defaultDuration;
+        }
+
+        public bool HasVersionRequirement =>
+            !string.IsNullOrWhiteSpace(MinVersion) || MinBuild > 0;
+
+        public string GetDisplayMessage() =>
+            !string.IsNullOrWhiteSpace(DisabledMessage)
+                ? DisabledMessage
+                : "This feature is temporarily unavailable. Please try again later.";
+
+        public string GetOutdatedMessage(string required, string current, string? fallback = null)
+        {
+            string template = !string.IsNullOrWhiteSpace(OutdatedMessage)
+                ? OutdatedMessage!
+                : (!string.IsNullOrWhiteSpace(fallback)
+                    ? fallback!
+                    : "This feature now requires a newer version of the app. " +
+                      "Update to {required} to continue — you are on {current}.");
+
+            return template
+                .Replace("{required}", required)
+                .Replace("{current}", current);
+        }
+    }
+}

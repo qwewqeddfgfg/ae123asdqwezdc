@@ -1,0 +1,12 @@
+#SocketList{width: 100%;flow-children: down;}
+#RareSocketList{width: 100%;flow-children: down;}
+#SocketPanel{visibility: collapse;}
+#RareSocketPanel{visibility: collapse;}
+#RareSocketPanel{visibility: visible;}
+.GemIconEmpty{background-color: #2A2E2F;width: 40px;height: 18px;box-shadow: inset #000000aa -3px 3px 0px 3px;border-bottom: 1px solid #55555511;}
+.RemoveRareGemsButton{visibility: collapse;}
+.RemoveRareGemsButton{visibility: visible;}
+.AddSocketButton{visibility: collapse;}
+.AddSocketButton{visibility: visible;}
+.AddSocketInfo{visibility: collapse;}
+.AddSocketInfo{visibility: visible;}

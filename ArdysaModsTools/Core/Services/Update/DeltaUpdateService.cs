@@ -1,0 +1,869 @@
+/*
+ * Copyright (C) 2026 Ardysa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using ArdysaModsTools.Core.Constants;
+using ArdysaModsTools.Core.Services.Cdn;
+using ArdysaModsTools.Core.Services.Update.Models;
+using ArdysaModsTools.Helpers;
+
+namespace ArdysaModsTools.Core.Services.Update
+{
+    public sealed class DeltaUpdateService
+    {
+        public const string UpdaterRelPath = "tools/updater/AMT.Updater.exe";
+
+        public const string InProgressMarker = ".amt-update-in-progress";
+
+        public const string BackupExtension = ".amtbak";
+
+        public const string IncomingExtension = ".amtnew";
+
+        public const string StagedOkMarker = ".staged-ok";
+
+        public const string ApplyPlanFile = "apply.json";
+
+        private const string ManifestFileName = "files.json";
+
+        private const string ApplierLogFile = "update.log";
+
+        private const string ApplierFailureTag = "FAILED: ";
+
+        private const int ManifestTimeoutSeconds = 15;
+
+        private const int MaxParallelDownloads = 6;
+
+        private static readonly JsonSerializerOptions PlanJsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = true
+        };
+
+        private const string StateFileName = "update_state.json";
+
+        internal sealed class UpdateState
+        {
+            public HashSet<string> FailedVersions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+            public Dictionary<string, int> AttemptCounts { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+            public Dictionary<string, string> FailureReasons { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private readonly Logger _logger;
+        private readonly string _installDir;
+        private readonly string _stagingRoot;
+        private readonly AppVersion _currentVersion;
+        private readonly HashSet<string> _failedVersions = new(StringComparer.OrdinalIgnoreCase);
+        private readonly UpdateState _state = new();
+        private readonly object _stateLock = new();
+
+        public string? LastReportedFailure { get; private set; }
+
+        public DeltaUpdateService(
+            Logger logger,
+            string? installDir = null,
+            string? stagingRoot = null,
+            AppVersion? currentVersion = null)
+        {
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _installDir = (installDir ?? AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
+            _stagingRoot = stagingRoot ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ArdysaModsTools", "update");
+            _currentVersion = currentVersion ?? AppVersion.Current;
+
+            LoadState();
+        }
+
+        #region State Persistence
+
+        private static string NormalizeVersion(string version) =>
+            version.Trim().TrimStart('v', 'V');
+
+        private void LoadState()
+        {
+            lock (_stateLock)
+            {
+                try
+                {
+                    string statePath = Path.Combine(_stagingRoot, StateFileName);
+                    if (File.Exists(statePath))
+                    {
+                        string json = File.ReadAllText(statePath);
+                        var loaded = JsonSerializer.Deserialize<UpdateState>(json, PlanJsonOptions);
+                        if (loaded != null)
+                        {
+                            if (loaded.FailedVersions != null)
+                            {
+                                foreach (var v in loaded.FailedVersions)
+                                {
+                                    if (!string.IsNullOrWhiteSpace(v))
+                                    {
+                                        _state.FailedVersions.Add(v);
+                                        _failedVersions.Add(v);
+                                    }
+                                }
+                            }
+                            if (loaded.AttemptCounts != null)
+                            {
+                                foreach (var (k, val) in loaded.AttemptCounts)
+                                {
+                                    _state.AttemptCounts[k] = val;
+                                }
+                            }
+                            if (loaded.FailureReasons != null)
+                            {
+                                foreach (var (k, val) in loaded.FailureReasons)
+                                {
+                                    _state.FailureReasons[k] = val;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private void SaveState()
+        {
+            lock (_stateLock)
+            {
+                try
+                {
+                    Directory.CreateDirectory(_stagingRoot);
+                    string statePath = Path.Combine(_stagingRoot, StateFileName);
+                    string json = JsonSerializer.Serialize(_state, PlanJsonOptions);
+                    File.WriteAllText(statePath, json);
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        public void MarkVersionFailed(string? version, string? reason = null, bool log = true)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return;
+
+            string vNorm = NormalizeVersion(version);
+            lock (_stateLock)
+            {
+                _failedVersions.Add(version);
+                _failedVersions.Add(vNorm);
+
+                _state.FailedVersions.Add(version);
+                _state.FailedVersions.Add(vNorm);
+                if (!string.IsNullOrWhiteSpace(reason))
+                {
+                    _state.FailureReasons[version] = reason;
+                    _state.FailureReasons[vNorm] = reason;
+                }
+
+                SaveState();
+            }
+
+            if (log)
+            {
+                _logger.Log($"Incremental auto-update suppressed for v{version}{(string.IsNullOrWhiteSpace(reason) ? "" : $": {reason}")}");
+            }
+        }
+
+        public void MarkVersionAttempted(string? version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return;
+
+            string vNorm = NormalizeVersion(version);
+            lock (_stateLock)
+            {
+                int current = _state.AttemptCounts.TryGetValue(version, out int c1) ? c1 : 0;
+                int currentNorm = _state.AttemptCounts.TryGetValue(vNorm, out int c2) ? c2 : 0;
+                int next = Math.Max(current, currentNorm) + 1;
+
+                _state.AttemptCounts[version] = next;
+                _state.AttemptCounts[vNorm] = next;
+                SaveState();
+            }
+        }
+
+        public string? GetFailureReason(string? version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return null;
+
+            string vNorm = NormalizeVersion(version);
+            lock (_stateLock)
+            {
+                if (_state.FailureReasons.TryGetValue(version, out var r1) && !string.IsNullOrWhiteSpace(r1))
+                    return r1;
+                if (_state.FailureReasons.TryGetValue(vNorm, out var r2) && !string.IsNullOrWhiteSpace(r2))
+                    return r2;
+            }
+
+            return null;
+        }
+
+        public void ClearFailedVersion(string? version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return;
+
+            string vNorm = NormalizeVersion(version);
+            lock (_stateLock)
+            {
+                _failedVersions.Remove(version);
+                _failedVersions.Remove(vNorm);
+                _state.FailedVersions.Remove(version);
+                _state.FailedVersions.Remove(vNorm);
+                _state.AttemptCounts.Remove(version);
+                _state.AttemptCounts.Remove(vNorm);
+                _state.FailureReasons.Remove(version);
+                _state.FailureReasons.Remove(vNorm);
+                SaveState();
+            }
+        }
+
+        public bool IsAutoUpdateLoopGuarded(string? version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return false;
+
+            if (HasLastApplyFailedForVersion(version))
+                return true;
+
+            string vNorm = NormalizeVersion(version);
+            lock (_stateLock)
+            {
+                int attempts = Math.Max(
+                    _state.AttemptCounts.TryGetValue(version, out int a1) ? a1 : 0,
+                    _state.AttemptCounts.TryGetValue(vNorm, out int a2) ? a2 : 0);
+
+                if (attempts >= 1)
+                {
+                    var target = new AppVersion(version, 0);
+                    if (_currentVersion.ShouldUpdateTo(target))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        #endregion
+
+        #region Prepare
+
+        public bool HasLastApplyFailedForVersion(string? version)
+        {
+            if (string.IsNullOrWhiteSpace(version))
+                return false;
+
+            string vNorm = NormalizeVersion(version);
+            lock (_stateLock)
+            {
+                if (_failedVersions.Contains(version) || _failedVersions.Contains(vNorm) ||
+                    _state.FailedVersions.Contains(version) || _state.FailedVersions.Contains(vNorm))
+                {
+                    return true;
+                }
+            }
+
+            try
+            {
+                foreach (var dirName in new[] { version, vNorm })
+                {
+                    string dir = Path.Combine(_stagingRoot, dirName);
+                    if (!Directory.Exists(dir))
+                        continue;
+
+                    foreach (var name in new[] { ApplierLogFile, ApplierLogFile + ".previous" })
+                    {
+                        string path = Path.Combine(dir, name);
+                        if (File.Exists(path))
+                        {
+                            if (File.ReadLines(path).Any(line => line.Contains(ApplierFailureTag, StringComparison.Ordinal)))
+                            {
+                                MarkVersionFailed(version, "Found failure tag in updater log");
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        public bool HasAnyRecentApplyFailed()
+        {
+            lock (_stateLock)
+            {
+                if (_failedVersions.Count > 0 || _state.FailedVersions.Count > 0)
+                    return true;
+            }
+
+            try
+            {
+                if (!Directory.Exists(_stagingRoot))
+                    return false;
+
+                foreach (var name in new[] { ApplierLogFile, ApplierLogFile + ".previous" })
+                {
+                    foreach (var logPath in Directory.EnumerateFiles(_stagingRoot, name, SearchOption.AllDirectories))
+                    {
+                        if (File.ReadLines(logPath).Any(line => line.Contains(ApplierFailureTag, StringComparison.Ordinal)))
+                        {
+                            string? versionDir = Path.GetFileName(Path.GetDirectoryName(logPath));
+                            if (!string.IsNullOrWhiteSpace(versionDir))
+                            {
+                                MarkVersionFailed(versionDir, "Found failure tag in updater log");
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        public static bool CanAutoUpdate(InstallationType type, UpdateInfo? info, DeltaUpdateService? delta = null)
+        {
+            if (type != InstallationType.Installer || string.IsNullOrWhiteSpace(info?.FilesManifestUrl) || string.IsNullOrWhiteSpace(info?.Version))
+                return false;
+
+            if (delta != null)
+            {
+                if (delta.HasLastApplyFailedForVersion(info.Version) ||
+                    delta.IsAutoUpdateLoopGuarded(info.Version))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        public async Task<DeltaPlan?> PrepareAsync(UpdateInfo info, CancellationToken ct = default)
+        {
+            if (info == null || string.IsNullOrWhiteSpace(info.FilesManifestUrl) || string.IsNullOrWhiteSpace(info.Version))
+                return null;
+
+            try
+            {
+                var manifest = await FetchManifestAsync(info.FilesManifestUrl!, ct).ConfigureAwait(false);
+                if (manifest == null || manifest.Count == 0)
+                {
+                    _logger.Log("Incremental update unavailable for this release (no file manifest).");
+                    return null;
+                }
+
+                if (!manifest.ContainsKey(UpdaterRelPath))
+                {
+                    _logger.Log("Incremental update unavailable for this release (no update applier published).");
+                    return null;
+                }
+
+                var oldManifest = await FetchManifestAsync(
+                    SiblingManifestUrl(info.FilesManifestUrl!, info.CurrentVersion), ct).ConfigureAwait(false);
+
+                var plan = await BuildPlanAsync(
+                    manifest, oldManifest, info.Version, _installDir,
+                    Path.Combine(_stagingRoot, info.Version),
+                    FilesBaseUrl(info.FilesManifestUrl!), ct).ConfigureAwait(false);
+
+                if (plan.Files.Count <= 1 && plan.Deletions.Count == 0)
+                {
+                    _logger.Log("Incremental update: local files already match the new release.");
+                    return null;
+                }
+
+                _logger.Log($"Incremental update ready: {plan.Files.Count} file(s), {FormatBytes(plan.TotalDownloadBytes)} to download.");
+                return plan;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.Log($"Could not prepare incremental update: {ex.Message}");
+                return null;
+            }
+        }
+
+        public static async Task<DeltaPlan> BuildPlanAsync(
+            IReadOnlyDictionary<string, AssetHashEntry> manifest,
+            IReadOnlyDictionary<string, AssetHashEntry>? oldManifest,
+            string version,
+            string installDir,
+            string stagingDir,
+            string filesBaseUrl,
+            CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(manifest);
+
+            var changed = new List<DeltaFile>();
+
+            foreach (var (relPath, expected) in manifest)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                string localPath = Path.Combine(installDir, relPath.Replace('/', Path.DirectorySeparatorChar));
+
+                bool needed = relPath.Equals(UpdaterRelPath, StringComparison.OrdinalIgnoreCase)
+                    || !await AssetHashVerifier.VerifyFileAsync(localPath, expected, ct).ConfigureAwait(false);
+
+                if (needed)
+                    changed.Add(new DeltaFile(relPath, expected.Sha256, expected.Size));
+            }
+
+            var deletions = oldManifest == null
+                ? Array.Empty<string>()
+                : oldManifest.Keys
+                    .Where(k => !manifest.ContainsKey(k))
+                    .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+
+            return new DeltaPlan
+            {
+                Version = version,
+                TargetDir = installDir,
+                StagingDir = stagingDir,
+                FilesBaseUrl = filesBaseUrl,
+                Files = changed.OrderBy(f => f.RelPath, StringComparer.OrdinalIgnoreCase).ToArray(),
+                Deletions = deletions
+            };
+        }
+
+        internal static string FilesBaseUrl(string manifestUrl) =>
+            manifestUrl[..(manifestUrl.LastIndexOf('/') + 1)] + "files/";
+
+        internal static string SiblingManifestUrl(string manifestUrl, string version)
+        {
+            string releaseDir = manifestUrl[..manifestUrl.LastIndexOf('/')];
+            string releasesRoot = releaseDir[..(releaseDir.LastIndexOf('/') + 1)];
+            return $"{releasesRoot}{version}/{ManifestFileName}";
+        }
+
+        #endregion
+
+        #region Stage
+
+        public async Task StageAsync(
+            DeltaPlan plan,
+            Action<string>? log = null,
+            IProgress<int>? progress = null,
+            CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(plan);
+
+            CleanStagingRoot(plan.StagingDir);
+            Directory.CreateDirectory(plan.StagingDir);
+
+            File.Delete(Path.Combine(plan.StagingDir, StagedOkMarker));
+
+            long total = Math.Max(1, plan.TotalDownloadBytes);
+            var files = plan.Files;
+            var bytesStaged = new long[files.Count];
+            int filesDone = 0;
+            int lastPercent = 0;
+            object progressGate = new();
+
+            void UpdateProgress(int slot, long fileBytes)
+            {
+                if (progress == null) return;
+                lock (progressGate)
+                {
+                    if (fileBytes <= bytesStaged[slot]) return;
+                    bytesStaged[slot] = fileBytes;
+
+                    long done = 0;
+                    for (int i = 0; i < bytesStaged.Length; i++) done += bytesStaged[i];
+
+                    int percent = (int)Math.Min(100, done * 100 / total);
+                    if (percent > lastPercent)
+                    {
+                        lastPercent = percent;
+                        progress.Report(percent);
+                    }
+                }
+            }
+
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, files.Count),
+                new ParallelOptions { MaxDegreeOfParallelism = MaxParallelDownloads, CancellationToken = ct },
+                async (i, token) =>
+                {
+                    var file = files[i];
+
+                    string destPath = Path.Combine(
+                        plan.StagingDir, "files", file.RelPath.Replace('/', Path.DirectorySeparatorChar));
+                    Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
+
+                    string url = plan.FilesBaseUrl + EncodePath(file.RelPath);
+
+                    var fileProgress = new Progress<int>(percent =>
+                        UpdateProgress(i, file.Size * Math.Clamp(percent, 0, 100) / 100));
+
+                    string pathSuffix = "/" + EncodePath(file.RelPath);
+                    string[] candidateUrls = CdnConfig.IsModsPackUrl(url)
+                        ? SmartCdnSelector.Instance.GetOrderedCdnUrls()
+                            .Select(b => CdnConfig.ConvertToCdn(url, b))
+                            .Where(u => u.EndsWith(pathSuffix, StringComparison.OrdinalIgnoreCase))
+                            .Distinct()
+                            .ToArray()
+                        : new[] { url };
+
+                    if (!candidateUrls.Contains(url, StringComparer.OrdinalIgnoreCase))
+                        candidateUrls = candidateUrls.Append(url).ToArray();
+
+                    await ResumableDownloadService.Instance.DownloadAsync(
+                        candidateUrls,
+                        destPath,
+                        log: null,
+                        progress: fileProgress,
+                        speedProgress: null,
+                        ct: token,
+                        expected: new AssetHashEntry { Sha256 = file.Sha256, Size = file.Size },
+                        reportCdnHealth: false)
+                        .ConfigureAwait(false);
+
+                    UpdateProgress(i, file.Size);
+                    log?.Invoke($"[{Interlocked.Increment(ref filesDone)}/{files.Count}] {file.RelPath}");
+                }).ConfigureAwait(false);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(plan.StagingDir, ApplyPlanFile),
+                JsonSerializer.Serialize(plan, PlanJsonOptions),
+                Encoding.UTF8, ct).ConfigureAwait(false);
+
+            await File.WriteAllTextAsync(
+                Path.Combine(plan.StagingDir, StagedOkMarker), plan.Version, Encoding.UTF8, ct).ConfigureAwait(false);
+
+            _logger.Log($"Update staged ({FormatBytes(plan.TotalDownloadBytes)}).");
+        }
+
+        #endregion
+
+        #region Apply
+
+        public async Task<bool> LaunchApplierAsync(DeltaPlan plan, CancellationToken ct = default)
+        {
+            ArgumentNullException.ThrowIfNull(plan);
+
+            string applier = Path.Combine(
+                plan.StagingDir, "files", UpdaterRelPath.Replace('/', Path.DirectorySeparatorChar));
+
+            if (!File.Exists(applier))
+            {
+                _logger.Log("Update applier missing from the staged files — cannot apply.");
+                return false;
+            }
+
+            var expected = plan.Files.FirstOrDefault(
+                f => f.RelPath.Equals(UpdaterRelPath, StringComparison.OrdinalIgnoreCase));
+
+            if (expected == null ||
+                !await AssetHashVerifier.VerifyFileAsync(
+                    applier, new AssetHashEntry { Sha256 = expected.Sha256, Size = expected.Size }, ct)
+                    .ConfigureAwait(false))
+            {
+                _logger.Log("Update applier failed its integrity check — refusing to run it.");
+                return false;
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = applier,
+                Arguments = $"--staging \"{plan.StagingDir}\" --pid {Environment.ProcessId}",
+                UseShellExecute = true,
+                WorkingDirectory = plan.StagingDir
+            };
+
+            if (!AdminHelper.IsRunningAsAdmin() && AdminHelper.IsInProtectedPath())
+                psi.Verb = "runas";
+
+            try
+            {
+                Process.Start(psi);
+                _logger.Log("Applying update — the app will restart.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.Log($"Could not start the update applier: {ex.Message}");
+                return false;
+            }
+        }
+
+        #endregion
+
+        #region Recovery
+
+        public void RepairInterruptedUpdate()
+        {
+            try
+            {
+                string marker = Path.Combine(_installDir, InProgressMarker);
+                bool interrupted = File.Exists(marker);
+
+                var backups = Enumerate(BackupExtension);
+                var incoming = Enumerate(IncomingExtension);
+
+                if (backups is null || incoming is null)
+                {
+                    if (interrupted)
+                        _logger.Log("Warning: a previous update did not finish and the install folder could not be scanned — it will be retried on the next start.");
+                    return;
+                }
+
+                if (!interrupted && backups.Count == 0 && incoming.Count == 0)
+                    return;
+
+                if (interrupted)
+                    _logger.Log("Warning: a previous update did not finish — repairing the installation...");
+
+                int restored = 0, cleaned = 0;
+
+                foreach (var backup in backups)
+                {
+                    string target = backup[..^BackupExtension.Length];
+                    try
+                    {
+                        if (interrupted && !File.Exists(target))
+                        {
+                            File.Move(backup, target);
+                            restored++;
+                        }
+                        else
+                        {
+                            File.Delete(backup);
+                            cleaned++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Log($"Cleanup could not handle {Path.GetFileName(backup)}: {ex.Message}");
+                    }
+                }
+
+                foreach (var partial in incoming)
+                {
+                    try { File.Delete(partial); } catch {  }
+                }
+
+                if (interrupted)
+                {
+                    File.Delete(marker);
+                    _logger.Log($"Installation repaired ({restored} file(s) restored, {cleaned} leftover(s) removed). Re-run the update to finish.");
+                }
+                else if (cleaned > 0 || incoming.Count > 0)
+                {
+                    _logger.Log($"Removed {cleaned + incoming.Count} leftover file(s) from the last update.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Log($"Cleanup failed: {ex.Message}. Reinstall from the website if the app misbehaves.");
+            }
+        }
+
+        public void ReportLastApplyOutcome()
+        {
+            try
+            {
+                if (!Directory.Exists(_stagingRoot))
+                    return;
+
+                foreach (var logPath in Directory.EnumerateFiles(
+                    _stagingRoot, ApplierLogFile, SearchOption.AllDirectories))
+                {
+                    string? failure = File.ReadLines(logPath)
+                        .LastOrDefault(line => line.Contains(ApplierFailureTag, StringComparison.Ordinal));
+
+                    string? versionDir = Path.GetFileName(Path.GetDirectoryName(logPath));
+
+                    if (failure != null)
+                    {
+                        int reasonAt = failure.IndexOf(ApplierFailureTag, StringComparison.Ordinal)
+                                       + ApplierFailureTag.Length;
+                        string reason = failure[reasonAt..];
+
+                        if (!string.IsNullOrWhiteSpace(versionDir))
+                        {
+                            MarkVersionFailed(versionDir, reason, log: false);
+                        }
+
+                        LastReportedFailure = $"Update to v{versionDir} failed: {reason}";
+
+                        _logger.Log("The last update could not be applied and the app was restarted on the " +
+                                    $"previous version — {reason} (details: {logPath})");
+                    }
+                    else
+                    {
+                        string? okLine = File.ReadLines(logPath)
+                            .LastOrDefault(line => line.Contains("OK: Updated to v", StringComparison.Ordinal));
+
+                        if (okLine != null && !string.IsNullOrWhiteSpace(versionDir))
+                        {
+                            var targetVer = new AppVersion(versionDir, 0);
+
+                            if (_currentVersion.ShouldUpdateTo(targetVer))
+                            {
+                                LastReportedFailure = $"Update to v{versionDir} was applied, but app version remained {_currentVersion}. Auto-update suppressed.";
+
+                                _logger.Log($"Warning: The update to v{versionDir} was applied, but the running app version is still {_currentVersion}. " +
+                                            $"Auto-update suppressed for v{versionDir} to prevent restart loop.");
+                                MarkVersionFailed(versionDir, $"App version unchanged after apply ({_currentVersion})", log: false);
+                            }
+                        }
+                    }
+
+                    try { File.Move(logPath, logPath + ".previous", overwrite: true); } catch {  }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Log($"Could not read the last update's log: {ex.Message}");
+            }
+        }
+
+        public void ClearStagingRoot() => CleanStagingRoot(_stagingRoot);
+
+        private List<string>? Enumerate(string extension)
+        {
+            try
+            {
+                return Directory.EnumerateFiles(_installDir, "*" + extension, SearchOption.AllDirectories).ToList();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        #endregion
+
+        #region Helpers
+
+        private async Task<Dictionary<string, AssetHashEntry>?> FetchManifestAsync(string url, CancellationToken ct)
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(ManifestTimeoutSeconds));
+
+            try
+            {
+                string? json;
+                if (CdnConfig.IsModsPackUrl(url))
+                {
+                    json = await CdnFallbackService.Instance
+                        .DownloadStringWithFallbackAsync(url, cts.Token)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    using var response = await HttpClientProvider.Client.GetAsync(url, cts.Token).ConfigureAwait(false);
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        if (response.StatusCode != System.Net.HttpStatusCode.NotFound)
+                            _logger.Log($"File manifest unavailable (HTTP {(int)response.StatusCode}): {url}");
+                        return null;
+                    }
+
+                    json = await response.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false);
+                }
+
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    _logger.Log($"File manifest unavailable: {url}");
+                    return null;
+                }
+
+                var parsed = AssetHashManifestService.ParseManifest(json);
+                if (parsed == null)
+                    _logger.Log($"File manifest could not be parsed: {url}");
+
+                return parsed;
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                _logger.Log("File manifest fetch timed out — offering the full download instead.");
+                return null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.Log($"File manifest fetch failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        private void CleanStagingRoot(string currentStagingDir)
+        {
+            try
+            {
+                if (Directory.Exists(_stagingRoot))
+                {
+                    foreach (var dir in Directory.EnumerateDirectories(_stagingRoot))
+                    {
+                        try { Directory.Delete(dir, recursive: true); } catch { }
+                    }
+
+                    foreach (var file in Directory.EnumerateFiles(_stagingRoot))
+                    {
+                        if (file.EndsWith(StateFileName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        try { File.Delete(file); } catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Log($"Could not clear the update staging folder: {ex.Message}");
+                if (!string.Equals(currentStagingDir, _stagingRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    try { if (Directory.Exists(currentStagingDir)) Directory.Delete(currentStagingDir, recursive: true); } catch { }
+                }
+            }
+        }
+
+        private static string EncodePath(string relPath) =>
+            string.Join("/", relPath.Split('/').Select(Uri.EscapeDataString));
+
+        private static string FormatBytes(long bytes) =>
+            bytes >= 1024 * 1024 ? $"{bytes / 1024.0 / 1024.0:F1} MB" : $"{bytes / 1024.0:F0} KB";
+
+        #endregion
+    }
+}

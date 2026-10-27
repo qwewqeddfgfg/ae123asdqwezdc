@@ -1,0 +1,48 @@
+{
+  "skins": {
+    "npc_dota_hero_terrorblade": {
+      "hero_base": "5957",
+      "head": "37161",
+      "weapon": "307",
+      "back": "306",
+      "armor": "476",
+      "ability3": "8650"
+    },
+    "npc_dota_hero_pudge": {
+      "persona_selector": "13786",
+      "weapon_persona_1": "27553",
+      "offhand_weapon_persona_1": "27554",
+      "head_persona_1": "27555",
+      "arms_persona_1": "27556",
+      "armor_persona_1": "27557"
+    },
+    "npc_dota_hero_queenofpain": {
+      "back": "12930",
+      "head": "13769",
+      "shoulder": "13768",
+      "weapon": "13770"
+    },
+    "npc_dota_hero_invoker": {
+      "head": "12762",
+      "back": "48",
+      "shoulder": "89",
+      "arms": "100",
+      "belt": "305"
+    }
+  },
+  "prismatic": {
+    "npc_dota_hero_terrorblade": {
+      "name": "Rubiline",
+      "hex": "#D11FA1",
+      "rgb": [
+        209,
+        31,
+        161
+      ]
+    }
+  },
+  "unusual": {
+    "npc_dota_hero_queenofpain": "particles/econ/courier/courier_trail_lava/courier_trail_lava.vpcf",
+    "npc_dota_hero_invoker": "particles/econ/seasonal/seasonal_ambient_silver.vpcf"
+  }
+}

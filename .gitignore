@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.pytest_cache/
+
+# Builds and compiled files
+server/builds/*.vpk
+server/builds/*/
+!server/builds/.gitkeep
+
+# C++ / Visual Studio / CMake
+client/build/CMakeFiles/
+client/build/*.dir/
+client/build/x64/
+client/build/*.vcxproj*
+client/build/CMakeCache.txt
+client/build/cmake_install.cmake
+client/build/DotaSkinChangerClient.slnx
+client/build/Release/*.obj
+client/build/Release/*.tlog
+client/build/Release/*.recipe
+client/build/Release/SkinChangerCore.dir/
+.vs/
+*.user
+*.suo
+
+# OS and IDE files
+.idea/
+.vscode/
+*.swp
+*.bak
+*.tmp
+Thumbs.db
+.DS_Store
+
+# Temporary logs
+*.log

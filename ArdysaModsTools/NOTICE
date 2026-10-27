@@ -1,0 +1,67 @@
+ArdysaModsTools (AMT)
+Copyright (C) 2024-2026 Ardysa (@Anneardysa)
+
+================================================================================
+1. SOFTWARE LICENSE (the code)
+================================================================================
+
+Versions up to and including build 2467 (v2.10.0-beta) were released under the
+GNU General Public License v3.0 (https://www.gnu.org/licenses/gpl-3.0.txt) and
+remain under it. Their source is the frozen snapshot in the public GitHub
+repository. You may copy, modify, and redistribute those versions under the
+terms of that license, which (among other obligations) requires that you
+preserve this copyright notice and make your modified source available under
+the same license.
+
+Build 2468 and every later version is PROPRIETARY software, relicensed by its
+sole author. Its terms are in the LICENSE file shipped with it; no part of it is
+licensed under GPL-3.0. Relicensing does NOT retroactively change the license of
+the versions already published under GPL-3.0.
+
+================================================================================
+2. TRADEMARKS & BRAND IDENTITY (NOT covered by the software license)
+================================================================================
+
+The software license above applies to the SOURCE CODE only. It does NOT grant
+any right to use the project's name, brand, identity, or associated marks.
+
+The following are the property of Ardysa and are NOT licensed under GPL-3.0 or
+any other license, and may NOT be used without prior written permission:
+
+  - The names "ArdysaMods", "ArdysaModsTools", and "AMT" (as used by this project)
+  - The project logo and application icon (Assets/Icons/AppIcon.ico)
+  - The visual identity / design system of the application and website
+  - The domains "ardysamods.my.id" and "cdn.ardysamods.my.id"
+  - Any social, community, or distribution channels operated under these names
+
+If you exercise your rights under the software license to create a fork or a
+derivative work, you MUST:
+
+  - Use a DIFFERENT name and logo that is not confusingly similar to the above.
+  - NOT represent your fork as the official ArdysaModsTools, nor imply
+    affiliation with or endorsement by Ardysa.
+  - NOT use the official domains, CDN, update endpoints, or community channels.
+
+Nominative references (e.g. "a fork of ArdysaModsTools") are permitted only to
+the extent necessary to accurately describe the origin of the code, and must
+not suggest official status or endorsement.
+
+================================================================================
+3. THIRD-PARTY ASSETS
+================================================================================
+
+This software downloads and manages third-party cosmetic content created by the
+Dota 2 modding community and assets owned by Valve Corporation. Those assets are
+NOT part of this software, are NOT covered by this NOTICE or the LICENSE, and
+remain the property of their respective owners. This project is not affiliated
+with, endorsed by, or connected to Valve Corporation or Steam.
+
+================================================================================
+4. ENFORCEMENT
+================================================================================
+
+Verbatim redistribution that strips the required attribution or otherwise
+violates the software license, and any use of the trademarks/brand identity in
+section 2 without permission, is actionable under copyright and/or trademark law
+independently of the software license. Reports of misuse:
+https://github.com/Anneardysa/ArdysaModsTools/issues

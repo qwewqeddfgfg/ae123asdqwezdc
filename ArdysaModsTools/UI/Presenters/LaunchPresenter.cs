@@ -1,0 +1,519 @@
+/*
+ * Copyright (C) 2026 Ardysa
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using ArdysaModsTools.Core.Interfaces;
+using ArdysaModsTools.Core.Models;
+using ArdysaModsTools.Core.Services;
+using ArdysaModsTools.Core.Services.Localization;
+using ArdysaModsTools.Core.Services.Security;
+using ArdysaModsTools.Helpers;
+using ArdysaModsTools.UI.Interfaces;
+
+namespace ArdysaModsTools.UI.Presenters
+{
+    public sealed class LaunchPresenter : IDisposable
+    {
+        private const string SteamLaunchUrl = "steam://rungameid/570";
+
+        internal const string SteamDownloadsUrl = "steam://open/downloads";
+
+        internal const string SteamClearCacheUrl = "steam://flushconfig";
+
+        private static readonly TimeSpan DefaultPollInterval = TimeSpan.FromSeconds(2);
+
+        private const int StallPolls = 23;
+
+        private const int SteamGonePolls = 15;
+
+        private static readonly TimeSpan LaunchTimeout = TimeSpan.FromMinutes(5);
+
+        private const int MaxPreparePasses = 3;
+
+        private readonly IMainFormView _view;
+        private readonly Logger _logger;
+        private readonly IItemsGameMergeService _merge;
+        private readonly IModInstallerService _modInstaller;
+        private readonly ISteamAppStateService _steam;
+
+        private readonly Func<string, bool> _launcher;
+
+        private readonly Func<bool> _steamRunning;
+
+        private readonly TimeSpan _pollInterval;
+
+        private volatile bool _steamActionsOffered;
+
+        private CancellationTokenSource? _cts;
+
+        private volatile bool _dotaRunning;
+
+        private volatile TaskCompletionSource<bool>? _confirmWaiter;
+
+        public LaunchPresenter(IMainFormView view, Logger logger,
+            IItemsGameMergeService merge, IModInstallerService modInstaller, ISteamAppStateService steam,
+            Func<string, bool>? launcher = null, Func<bool>? steamRunning = null, TimeSpan? pollInterval = null)
+        {
+            _view = view ?? throw new ArgumentNullException(nameof(view));
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _merge = merge ?? throw new ArgumentNullException(nameof(merge));
+            _modInstaller = modInstaller ?? throw new ArgumentNullException(nameof(modInstaller));
+            _steam = steam ?? throw new ArgumentNullException(nameof(steam));
+            _launcher = launcher ?? (url => UIHelpers.OpenUrl(url, _logger.Log));
+            _steamRunning = steamRunning ?? (() => Process.GetProcessesByName("steam").Any());
+            _pollInterval = pollInterval ?? DefaultPollInterval;
+        }
+
+        public bool IsRunning => _cts != null;
+
+        public event Action? PackageRepaired;
+
+        public void NotifyDotaRunning(bool running)
+        {
+            _dotaRunning = running;
+
+            if (running) _confirmWaiter?.TrySetResult(false);
+        }
+
+        public void ConfirmLaunch() => _confirmWaiter?.TrySetResult(true);
+
+        public void OpenSteamDownloads()
+        {
+            if (_steamActionsOffered) _launcher(SteamDownloadsUrl);
+        }
+
+        public async Task ClearSteamDownloadCacheAsync()
+        {
+            if (!_steamActionsOffered) return;
+
+            bool ok = await _view.ShowShellConfirmAsync(
+                Loc.T("play.button"),
+                Loc.T("play.clearCache.heading"),
+                Loc.T("play.clearCache.body"),
+                confirmText: Loc.T("play.clearCache.confirm"),
+                cancelText: Loc.T("play.panel.cancel"),
+                accent: "warn").ConfigureAwait(false);
+
+            if (!ok || !_steamActionsOffered) return;
+
+            _logger.LogDebug("[STEAM] clearing Steam's download cache at the user's request");
+            _launcher(SteamClearCacheUrl);
+        }
+
+        public void Cancel()
+        {
+            try { _cts?.Cancel(); } catch {  }
+        }
+
+        public async Task LaunchAsync(string? targetPath, bool needsPatch = false)
+        {
+            if (IsRunning) return;
+
+            if (_dotaRunning)
+            {
+                _view.ShowShellToast(Loc.T("play.button"), Loc.T("play.alreadyRunning"), "info");
+                return;
+            }
+
+            using var cts = new CancellationTokenSource();
+            _cts = cts;
+
+            try
+            {
+                await RunAsync(targetPath, needsPatch, cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                _view.SetLaunchPanel(null);
+            }
+            catch (Exception ex)
+            {
+                _logger.Log($"[PLAY] {ex.Message}");
+                ShowError("play.panel.failed", "play.merge.failed");
+            }
+            finally
+            {
+                _cts = null;
+            }
+        }
+
+        public async Task RepairOnlyAsync(string? targetPath)
+        {
+            if (IsRunning) return;
+
+            if (_dotaRunning)
+            {
+                _view.ShowShellToast(Loc.T("verify.chip.sync"), Loc.T("play.alreadyRunning"), "info");
+                return;
+            }
+
+            using var cts = new CancellationTokenSource();
+            _cts = cts;
+
+            try
+            {
+                var (ready, _) = await PrepareAsync(targetPath, Loc.T("verify.chip.sync"),
+                    needsPatch: false, cts.Token).ConfigureAwait(false);
+                if (!ready) return;
+
+                _view.SetLaunchPanel(null);
+                _view.ShowShellToast(Loc.T("verify.chip.sync"), Loc.T("play.sync.repaired"), "success");
+            }
+            catch (OperationCanceledException)
+            {
+                _view.SetLaunchPanel(null);
+            }
+            catch (Exception ex)
+            {
+                _logger.Log($"[PLAY] {ex.Message}");
+                ShowError("play.panel.failed", "play.merge.failed");
+            }
+            finally
+            {
+                _cts = null;
+            }
+        }
+
+        private async Task RunAsync(string? targetPath, bool needsPatch, CancellationToken ct)
+        {
+            var (ready, updated) = await PrepareAsync(targetPath, Loc.T("play.button"), needsPatch, ct)
+                .ConfigureAwait(false);
+            if (!ready) return;
+
+            if (updated && !await WaitForLaunchConfirmationAsync(ct).ConfigureAwait(false))
+            {
+                _view.SetLaunchPanel(null);
+                return;
+            }
+
+            if (!Launch(targetPath))
+                return;
+
+            await WaitForGameAsync(targetPath, ct).ConfigureAwait(false);
+        }
+
+        private enum SteamWait
+        {
+            NoUpdate,
+
+            Updated,
+
+            SteamClosed
+        }
+
+        private enum RepairStep
+        {
+            Ok,
+
+            Stop,
+
+            Retry
+        }
+
+        private async Task<(bool Ready, bool Updated)> PrepareAsync(
+            string? targetPath, string title, bool needsPatch, CancellationToken ct)
+        {
+            bool updated = false;
+
+            for (int pass = 0; pass < MaxPreparePasses; pass++)
+            {
+                Show("play.panel.checking", "play.panel.checkingDetail", percent: null);
+
+                var wait = await WaitForSteamUpdateAsync(targetPath, ct).ConfigureAwait(false);
+                if (wait == SteamWait.SteamClosed) return (false, updated);
+                if (wait == SteamWait.Updated) updated = true;
+
+                if (GameStartedWithoutUs(title)) return (false, updated);
+
+                if ((needsPatch || updated) &&!await PatchAsync(targetPath, ct).ConfigureAwait(false))
+                    return (false, updated);
+
+                var step = await RepairAsync(targetPath, ct).ConfigureAwait(false);
+                if (step == RepairStep.Stop) return (false, updated);
+                if (step == RepairStep.Ok) return (true, updated);
+
+                _logger.Log(Loc.T("play.merge.gameChanged"));
+                updated = true;
+            }
+
+            _logger.Log(Loc.T("play.merge.gameChangedGaveUp"));
+            ShowError("play.panel.failed", "play.merge.gameChangedGaveUp");
+            return (false, updated);
+        }
+
+        private async Task<SteamWait> WaitForSteamUpdateAsync(string? targetPath, CancellationToken ct)
+        {
+            var state = _steam.Read(targetPath);
+            if (!state.IsUpdatePending) return SteamWait.NoUpdate;
+
+            var lastProgress = Progress(state);
+            int stillPolls = 0, steamGonePolls = 0;
+            bool announced = false;
+
+            try
+            {
+                while (state.IsUpdatePending && !_dotaRunning)
+                {
+                    ct.ThrowIfCancellationRequested();
+
+                    steamGonePolls = _steamRunning() ? 0 : steamGonePolls + 1;
+                    if (steamGonePolls >= SteamGonePolls)
+                    {
+                        ShowError("play.panel.steamClosed", "play.panel.steamClosedDetail");
+                        _view.ShowShellToast(Loc.T("play.panel.steamClosed"),
+                            Loc.T("play.panel.steamClosedDetail"), "warning");
+                        _logger.Log(Loc.T("play.panel.steamClosedDetail"));
+                        return SteamWait.SteamClosed;
+                    }
+
+                    var progress = Progress(state);
+                    stillPolls = progress == lastProgress ? stillPolls + 1 : 0;
+                    lastProgress = progress;
+
+                    if (state.IsPaused || stillPolls >= StallPolls)
+                    {
+                        ShowStalled(state);
+                        if (!announced)
+                        {
+                            announced = true;
+                            string detail = StalledDetail(state);
+                            _logger.Log(detail);
+                            _logger.LogDebug($"[STEAM] update not moving: {state}");
+                            _view.ShowShellToast(Loc.T(StalledHeadingKey(state)), detail, "warning");
+                        }
+                    }
+                    else
+                    {
+                        _steamActionsOffered = false;
+                        Show("play.panel.steamUpdating", "play.panel.steamUpdatingDetail", state.UpdatePercent);
+                    }
+
+                    await Task.Delay(_pollInterval, ct).ConfigureAwait(false);
+                    state = _steam.Read(targetPath);
+                }
+            }
+            finally
+            {
+                _steamActionsOffered = false;
+            }
+
+            return SteamWait.Updated;
+        }
+
+        private static (long, long, long, long) Progress(SteamAppState s) =>
+            (s.StateFlags, s.BytesDownloaded, s.BytesStaged, s.BuildId);
+
+        private static string StalledHeadingKey(SteamAppState s) =>
+            s.UpdateResult != 0 ? "play.panel.steamUpdateFailed" : "play.panel.steamStalled";
+
+        private static string StalledDetailKey(SteamAppState s) =>
+            s.UpdateResult != 0 ? "play.panel.steamUpdateFailedDetail" : "play.panel.steamStalledDetail";
+
+        private static object? StalledVars(SteamAppState s) =>
+            s.UpdateResult != 0 ? new { code = s.UpdateResult } : null;
+
+        private static string StalledDetail(SteamAppState s) =>
+            StalledVars(s) is { } vars ? Loc.T(StalledDetailKey(s), vars) : Loc.T(StalledDetailKey(s));
+
+        private void ShowStalled(SteamAppState s)
+        {
+            _steamActionsOffered = true;
+            _view.SetLaunchPanel(new LaunchPanelState
+            {
+                HeadingKey = StalledHeadingKey(s),
+                DetailKey = StalledDetailKey(s),
+                DetailVars = StalledVars(s),
+                Percent = s.UpdatePercent,
+                CanCancel = true,
+                ShowSteamActions = true
+            });
+        }
+
+        private bool GameStartedWithoutUs(string title)
+        {
+            if (!_dotaRunning) return false;
+
+            _view.SetLaunchPanel(null);
+            _view.ShowShellToast(title, Loc.T("play.alreadyRunning"), "info");
+            return true;
+        }
+
+        private async Task<bool> WaitForLaunchConfirmationAsync(CancellationToken ct)
+        {
+            if (_dotaRunning) return false;
+
+            var waiter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _confirmWaiter = waiter;
+
+            if (_dotaRunning) waiter.TrySetResult(false);
+
+            try
+            {
+                _view.SetLaunchPanel(new LaunchPanelState
+                {
+                    HeadingKey = "play.panel.updated",
+                    DetailKey = "play.panel.updatedDetail",
+                    ConfirmKey = "play.panel.launchNow",
+                    CanCancel = true
+                });
+
+                using (ct.Register(() => waiter.TrySetCanceled(ct)))
+                    return await waiter.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                _confirmWaiter = null;
+            }
+        }
+
+        private async Task<bool> PatchAsync(string? targetPath, CancellationToken ct)
+        {
+            Show("play.panel.patching", "play.panel.patchingDetail", percent: null, canCancel: true);
+
+            var result = await _modInstaller.UpdatePatcherAsync(targetPath!, null, ct).ConfigureAwait(false);
+
+            if (result == PatchResult.Cancelled)
+                throw new OperationCanceledException(ct);
+
+            if (result == PatchResult.Failed)
+            {
+                _logger.Log(Loc.T("patch.failed.body"));
+                ShowError("play.panel.failed", "patch.failed.body");
+                return false;
+            }
+
+            if (result == PatchResult.Success)
+                _logger.Log(Loc.T("patch.complete.body"));
+
+            return true;
+        }
+
+        private async Task<RepairStep> RepairAsync(string? targetPath, CancellationToken ct)
+        {
+            var statusKey = "play.merge.reading";
+            var status = new Progress<string>(key => statusKey = key);
+            var percent = new Progress<int>(p => Show("play.panel.merging", statusKey, p, canCancel: true));
+
+            Show("play.panel.merging", statusKey, 0);
+
+            var result = await _merge.MergeAsync(targetPath, status, percent, ct).ConfigureAwait(false);
+
+            if (result.Outcome == ItemsGameMergeOutcome.GameChanged)
+                return RepairStep.Retry;
+
+            if (result.Outcome == ItemsGameMergeOutcome.Failed)
+            {
+                _logger.Log(Loc.T(result.FailureKey ?? "play.merge.failed"));
+                if (!string.IsNullOrWhiteSpace(result.Diagnostic))
+                    _logger.LogDebug($"[PLAY] {result.Diagnostic}");
+
+                ShowError("play.panel.failed", result.FailureKey ?? "play.merge.failed");
+                return RepairStep.Stop;
+            }
+
+            if (result.Outcome == ItemsGameMergeOutcome.Merged)
+            {
+                _logger.Log(Loc.T("play.merge.done"));
+                PackageRepaired?.Invoke();
+            }
+
+            return RepairStep.Ok;
+        }
+
+        private bool Launch(string? targetPath)
+        {
+            Show("play.panel.launching", "play.panel.launchingDetail", percent: null, canCancel: true);
+
+            ActiveProcessSentry.KillRunningThreats(_logger);
+
+            ProcessProtectionGuard.ProtectCurrentProcess(_logger);
+
+            if (_launcher(SteamLaunchUrl)) return true;
+
+            ProcessProtectionGuard.UnprotectCurrentProcess(_logger);
+
+            ShowError("play.panel.failed", "play.panel.steamFailed");
+            return false;
+        }
+
+        private async Task WaitForGameAsync(string? targetPath, CancellationToken ct)
+        {
+            var deadline = DateTime.UtcNow + LaunchTimeout;
+
+            while (DateTime.UtcNow < deadline)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                if (_dotaRunning)
+                {
+                    Show("play.panel.running", "play.panel.runningDetail", percent: null, canCancel: false);
+                    await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
+                    _view.SetLaunchPanel(null);
+                    return;
+                }
+
+                if (_steam.Read(targetPath).IsUpdatePending)
+                {
+                    var (ready, _) = await PrepareAsync(targetPath, Loc.T("play.button"),
+                        needsPatch: true, ct).ConfigureAwait(false);
+
+                    if (_dotaRunning) continue;
+                    if (!ready) return;
+
+                    if (!await WaitForLaunchConfirmationAsync(ct).ConfigureAwait(false))
+                    {
+                        _view.SetLaunchPanel(null);
+                        return;
+                    }
+
+                    if (!Launch(targetPath)) return;
+
+                    deadline = DateTime.UtcNow + LaunchTimeout;
+                    continue;
+                }
+
+                Show("play.panel.waiting", "play.panel.waitingDetail", percent: null, canCancel: true);
+                await Task.Delay(_pollInterval, ct).ConfigureAwait(false);
+            }
+
+            ShowError("play.panel.timeout", "play.panel.timeoutDetail");
+        }
+
+        private void Show(string headingKey, string detailKey, int? percent, bool canCancel = true) =>
+            _view.SetLaunchPanel(new LaunchPanelState
+            {
+                HeadingKey = headingKey,
+                DetailKey = detailKey,
+                Percent = percent,
+                CanCancel = canCancel
+            });
+
+        private void ShowError(string headingKey, string detailKey) =>
+            _view.SetLaunchPanel(new LaunchPanelState
+            {
+                HeadingKey = headingKey,
+                DetailKey = detailKey,
+                CanCancel = true,
+                IsError = true
+            });
+
+        public void Dispose() => Cancel();
+    }
+}
