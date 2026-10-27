@@ -600,11 +600,11 @@ class FastVpkBuilder:
 
         body = target_raw[first_brace + 1:last_brace].strip()
 
-        # Preserve prefab (wearable / etc.), ensure not default_item so inspect doesn't show "СТАНДАРТНЫЙ НАБОР"
+        # Always keep / set prefab to "default_item" so Dota 2 engine auto-equips the model in loadout & match
         if '"prefab"' not in body:
-            body = '\t"prefab"\t\t"wearable"\n' + body
-        elif '"prefab"' in body and '"default_item"' in body:
-            body = re.sub(r'"prefab"\s+"default_item"', '"prefab"\t\t"wearable"', body)
+            body = '\t"prefab"\t\t"default_item"\n' + body
+        else:
+            body = re.sub(r'"prefab"\s+"[^"]+"', '"prefab"\t\t"default_item"', body)
 
         # Preserve / ensure capabilities so Dota Inspect renders Common Sockets, Properties, Description
         if '"capabilities"' not in body:
@@ -700,26 +700,39 @@ class FastVpkBuilder:
                 if has_arcana:
                     tb_particle = hero_unusual if hero_unusual else None
 
-                    # Equip Arcana onto head slot (478)
-                    if "478" not in replaced_def_ids and "478" in self.item_spans and "5957" in self.item_spans:
-                        arcana_block = self.build_merged_item_block(
-                            def_id="478",
+                    # 1. Equip Arcana body onto hero_base (913) - this swaps the entity_model to terrorblade_arcana.vmdl
+                    if "913" not in replaced_def_ids and "913" in self.item_spans and "5957" in self.item_spans:
+                        base_block = self.build_merged_item_block(
+                            def_id="913",
                             target_item_id="5957",
                             hero_name=hero_name,
-                            slot_name="head",
+                            slot_name="hero_base",
                             unusual_particle=tb_particle,
                             kinetic_activity=hero_kinetic,
                         )
-                        if arcana_block:
-                            if '"model_player"' not in arcana_block:
-                                arcana_block = arcana_block.replace(
+                        if base_block:
+                            bspan = self.item_spans["913"]
+                            replacements.append((bspan[0], bspan[1], base_block))
+                            replaced_def_ids.add("913")
+
+                    # 2. Equip Arcana horns onto head (478) - official horns model
+                    horns_target_id = "37161" if "37161" in self.item_spans else "478"
+                    if "478" not in replaced_def_ids and "478" in self.item_spans:
+                        horns_block = self.build_merged_item_block(
+                            def_id="478",
+                            target_item_id=horns_target_id,
+                            hero_name=hero_name,
+                            slot_name="head",
+                        )
+                        if horns_block:
+                            if '"model_player"' not in horns_block:
+                                horns_block = horns_block.replace(
                                     '"item_slot"\t\t"head"',
-                                    '"item_slot"\t\t"head"\r\n\t\t\t"model_player"\t\t"models/heroes/terrorblade/horns_arcana.vmdl"'
+                                    '"item_slot"\t\t"head"\n\t\t\t"model_player"\t\t"models/heroes/terrorblade/horns_arcana.vmdl"'
                                 )
-                            dspan = self.item_spans["478"]
-                            replacements.append((dspan[0], dspan[1], arcana_block))
+                            hspan = self.item_spans["478"]
+                            replacements.append((hspan[0], hspan[1], horns_block))
                             replaced_def_ids.add("478")
-                            replaced_def_ids.add("913")  # Preserve default 913 cleanly
 
             # --- GENERAL SLOTS MAPPING ---
             for slot_name, skin_val in slots.items():
@@ -781,6 +794,10 @@ class FastVpkBuilder:
                 if hero_unusual and is_effect_slot:
                     item_particle = hero_unusual
 
+                # Never replace a default slot with itself: keep vanilla default block intact!
+                if target_item_id == def_id and selected_style is None and not item_particle and not hero_kinetic:
+                    continue
+
                 new_block = self.build_merged_item_block(
                     def_id=def_id,
                     target_item_id=target_item_id,
@@ -830,6 +847,12 @@ class FastVpkBuilder:
         try:
             scripts_dir = os.path.join(temp_dir, "scripts", "items")
             os.makedirs(scripts_dir, exist_ok=True)
+            # Enforce LF line endings and verify bracket balance
+            patched_text = patched_text.replace('\r\n', '\n').replace('\r', '\n')
+            open_cnt = patched_text.count('{')
+            close_cnt = patched_text.count('}')
+            if open_cnt != close_cnt:
+                print(f"[Builder] Warning: Brace mismatch in items_game.txt: {{ = {open_cnt}, }} = {close_cnt}")
             vpk_internal_file = os.path.join(scripts_dir, "items_game.txt")
             with open(vpk_internal_file, "wb") as f:
                 f.write(patched_text.encode("utf-8"))
@@ -841,36 +864,8 @@ class FastVpkBuilder:
                     model_maps = {}
 
                     # A. Pudge Persona (Cute) direct model overrides
-                    if "npc_dota_hero_pudge" in skins and str(skins["npc_dota_hero_pudge"].get("persona_selector")) == "13786":
-                        p_slots = skins["npc_dota_hero_pudge"]
-                        model_maps['models/heroes/pudge/pudge.vmdl_c'] = 'models/heroes/pudge_cute/pudge_cute.vmdl_c'
-
-                        slot_to_dest = {
-                            'weapon_persona_1': 'models/heroes/pudge/righthook.vmdl_c',
-                            'offhand_weapon_persona_1': 'models/heroes/pudge/leftweapon.vmdl_c',
-                            'armor_persona_1': 'models/heroes/pudge/back.vmdl_c',
-                            'head_persona_1': 'models/heroes/pudge/hair.vmdl_c',
-                            'arms_persona_1': 'models/heroes/pudge/bracer.vmdl_c',
-                        }
-
-                        default_cute_models = {
-                            'weapon_persona_1': 'models/heroes/pudge_cute/pudge_cute_hook.vmdl_c',
-                            'offhand_weapon_persona_1': 'models/heroes/pudge_cute/pudge_cute_offhand.vmdl_c',
-                            'armor_persona_1': 'models/heroes/pudge_cute/pudge_cute_costume.vmdl_c',
-                            'head_persona_1': 'models/heroes/pudge_cute/pudge_cute_hair.vmdl_c',
-                            'arms_persona_1': 'models/heroes/pudge_cute/pudge_cute_arms.vmdl_c',
-                        }
-
-                        for p_slot, dst in slot_to_dest.items():
-                            src_model = default_cute_models[p_slot]
-                            chosen_id = str(p_slots.get(p_slot, ""))
-                            if chosen_id and chosen_id in self.item_spans:
-                                c_span = self.item_spans[chosen_id]
-                                c_raw = self.raw_text[c_span[0]:c_span[1]]
-                                m_c = re.search(r'"model_player"\s+"([^"]+)"', c_raw)
-                                if m_c:
-                                    src_model = m_c.group(1).strip() + "_c"
-                            model_maps[dst] = src_model
+                    # Persona slots are handled natively via items_game.txt (persona_selector and persona slots)
+                    pass
 
                     # B. Queen of Pain Arcana direct model overrides
                     if "npc_dota_hero_queenofpain" in skins:

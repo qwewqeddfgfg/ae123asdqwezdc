@@ -44,3 +44,6 @@ Thumbs.db
 
 *.vpk
 
+
+[Bb]in/
+[Oo]bj/

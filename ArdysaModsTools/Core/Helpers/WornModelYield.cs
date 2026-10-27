@@ -74,6 +74,18 @@ namespace ArdysaModsTools.Core.Helpers
                         continue;
                     }
 
+                    // Strict persona isolation: do not strip model swap across persona boundary
+                    KeyValuesBlockHelper.TryGetTopLevelValue(block, "item_slot", out var s1);
+                    string? s2 = null;
+                    if (finalBlocks.TryGetValue(worn.Id, out var wornEntry))
+                    {
+                        KeyValuesBlockHelper.TryGetTopLevelValue(wornEntry.Block, "item_slot", out s2);
+                    }
+                    bool isPersona1 = s1 != null && s1.IndexOf("persona", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool isPersona2 = s2 != null && s2.IndexOf("persona", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (isPersona1 != isPersona2)
+                        continue;
+
                     if (!result.StripRows.TryGetValue(id, out var set))
                         result.StripRows[id] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     set.Add(asset);

@@ -150,12 +150,50 @@ namespace ArdysaModsTools.Core.Helpers
             }
 
             if (defaultModelOf != null)
+            {
                 foreach (var (id, (block, layer)) in finalBlocks.OrderBy(kv => kv.Key, StringComparer.Ordinal))
-                    if (baked.Contains(layer) && !withVariant.Contains(layer)
-                        && defaultModelOf(id) is string def && def.Trim().Length == 0
+                {
+                    if (!baked.Contains(layer) || withVariant.Contains(layer))
+                        continue;
+
+                    if (defaultModelOf(id) is string def && def.Trim().Length == 0
                         && KeyValuesBlockHelper.TryGetTopLevelValue(block, "model_player", out var mp)
                         && !string.IsNullOrWhiteSpace(mp))
+                    {
+                        string slot = KeyValuesBlockHelper.TryGetTopLevelValue(block, "item_slot", out var s) ? s?.Trim() ?? "" : "";
+                        bool isPersona = slot.IndexOf("persona", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                        // Check if another active block in finalBlocks provides a valid model_player for this slot
+                        bool hasOtherValidModel = false;
+                        if (!string.IsNullOrWhiteSpace(slot))
+                        {
+                            foreach (var (otherId, (otherBlock, _)) in finalBlocks)
+                            {
+                                if (otherId == id) continue;
+                                if (KeyValuesBlockHelper.TryGetTopLevelValue(otherBlock, "item_slot", out var os) &&
+                                    string.Equals(os?.Trim(), slot, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    if (KeyValuesBlockHelper.TryGetTopLevelValue(otherBlock, "model_player", out var omp) &&
+                                        !string.IsNullOrWhiteSpace(omp))
+                                    {
+                                        hasOtherValidModel = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        bool isDefault = KeyValuesBlockHelper.TryGetTopLevelValue(block, "prefab", out var pr) &&
+                                         string.Equals(pr?.Trim(), "default_item", StringComparison.OrdinalIgnoreCase);
+
+                        // Never delete model_player if default_item or persona without valid replacement!
+                        if ((isDefault || isPersona) && !hasOtherValidModel)
+                            continue;
+
                         result.StripWearable.Add(id);
+                    }
+                }
+            }
             return result;
         }
 

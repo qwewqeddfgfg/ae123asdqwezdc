@@ -1293,8 +1293,38 @@ namespace ArdysaModsTools.Core.Services
 
             var wearableKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "model_player", "match_cycle_to_parent" };
             foreach (var id in result.StripWearable)
-                mergedBlocks[id] = (KeyValuesBlockHelper.RemoveTopLevelKeys(mergedBlocks[id].block, wearableKeys, out _),
-                                    mergedBlocks[id].heroId);
+            {
+                if (mergedBlocks.TryGetValue(id, out var mb))
+                {
+                    string slot = KeyValuesBlockHelper.TryGetTopLevelValue(mb.block, "item_slot", out var s) ? s?.Trim() ?? "" : "";
+                    bool isPersona = slot.IndexOf("persona", StringComparison.OrdinalIgnoreCase) >= 0;
+                    bool hasOtherValidModel = false;
+                    if (!string.IsNullOrWhiteSpace(slot))
+                    {
+                        foreach (var kv in mergedBlocks)
+                        {
+                            if (kv.Key == id) continue;
+                            if (KeyValuesBlockHelper.TryGetTopLevelValue(kv.Value.block, "item_slot", out var os) &&
+                                string.Equals(os?.Trim(), slot, StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (KeyValuesBlockHelper.TryGetTopLevelValue(kv.Value.block, "model_player", out var omp) &&
+                                    !string.IsNullOrWhiteSpace(omp))
+                                {
+                                    hasOtherValidModel = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    bool isDefault = KeyValuesBlockHelper.TryGetTopLevelValue(mb.block, "prefab", out var pr) &&
+                                     string.Equals(pr?.Trim(), "default_item", StringComparison.OrdinalIgnoreCase);
+                    if ((isDefault || isPersona) && !hasOtherValidModel)
+                        continue;
+
+                    mergedBlocks[id] = (KeyValuesBlockHelper.RemoveTopLevelKeys(mb.block, wearableKeys, out _), mb.heroId);
+                }
+            }
 
             string owners = result.Owner ?? string.Join(", ", result.Restore.Values
                 .Concat(result.VariantApply.Values.Select(v => $"{v.Layer}#{v.Key}")).Distinct(StringComparer.OrdinalIgnoreCase));

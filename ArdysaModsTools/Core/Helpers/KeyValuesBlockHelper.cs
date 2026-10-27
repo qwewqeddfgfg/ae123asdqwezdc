@@ -868,6 +868,7 @@ namespace ArdysaModsTools.Core.Helpers
                 "hero_presets",
                 "item_slot",
                 "prefab",
+                "model_player",
             };
 
         public static string OverlayBlockPreservingStructure(string vanillaBlock, string indexBlock)
@@ -885,8 +886,12 @@ namespace ArdysaModsTools.Core.Helpers
             var vanillaChildren = EnumerateTopLevelChildren(vanillaLf);
             var indexKeys = new HashSet<string>(indexChildren.Select(c => c.Key), StringComparer.OrdinalIgnoreCase);
 
+            bool indexHasModel = indexKeys.Contains("model_player") ||
+                                 indexBlock.IndexOf("\"entity_model\"", StringComparison.OrdinalIgnoreCase) >= 0;
+
             var vanillaOnly = vanillaChildren
                 .Where(c => EssentialVanillaKeys.Contains(c.Key) && !indexKeys.Contains(c.Key))
+                .Where(c => !string.Equals(c.Key, "model_player", StringComparison.OrdinalIgnoreCase) || !indexHasModel)
                 .ToList();
 
             if (vanillaOnly.Count == 0) return indexBlock;

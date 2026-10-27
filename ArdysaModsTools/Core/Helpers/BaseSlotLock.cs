@@ -63,9 +63,12 @@ namespace ArdysaModsTools.Core.Helpers
         {
             if (string.IsNullOrWhiteSpace(itemTag) || slots == null || slots.Count == 0) return false;
             var tag = NormalizeSlot(itemTag);
+            bool isPersonaTag = tag.IndexOf("persona", StringComparison.OrdinalIgnoreCase) >= 0;
             foreach (var s in slots)
             {
                 var slot = NormalizeSlot(s);
+                bool isPersonaS = slot.IndexOf("persona", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (isPersonaTag != isPersonaS) continue;
                 if (slot == tag || slot.Split('_').Select(NormalizeSlot).Contains(tag)) return true;
             }
             return false;
